@@ -30,11 +30,6 @@ _user = dbutils.widgets.get("user")
 
 # COMMAND ----------
 
-# DBTITLE 1,Env Setup
-# MAGIC %run "include/env"
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Imports
 
@@ -704,121 +699,6 @@ process_log_table.current().orderBy(col("file_name"), col("process_date").desc()
 
 # MAGIC %md
 # MAGIC # Manual Testing
-
-# COMMAND ----------
-
-# DBTITLE 1,Move failed jobs to OVERRIDE
-# Override failed files: re-log them as COMPLETED so they won't be retried.
-# Since files stay in INCOMING after failure, this just updates the log.
-# Run the "Failed Files" cell above to see candidates in failed_df.
-
-# for row in failed_df.collect():
-#     log_status(
-#         row["file_name"],
-#         row["file_size"],
-#         row["file_checksum"],
-#         Processing_Status.COMPLETED,
-#         error_message="Manually overridden - lacking scheduled files in tar archive"
-#     )
-
-# COMMAND ----------
-
-# DBTITLE 1,manual load
-manual = False
-
-if manual:
-  sample = "dlverreport_787768_202503.tar.gz"
-  bytes_io = get_file_bytesio(sample)
-  file_size = get_bytesio_size(bytes_io)
-  checksum = calculate_checksum(bytes_io)
-  local_path, dbfs_path = extract_scheduled_files(bytes_io)
-
-# COMMAND ----------
-
-# DBTITLE 1,manual removal
-if manual: 
-  dbutils.fs.rm("/dbfs/FileStore/tmp/47fb7a0f401a488a9e8152f9ecbe382a", recurse=True)
-
-# COMMAND ----------
-
-# DBTITLE 1,manual process
-if manual: 
-  df = process_detail_file(local_path)
-
-# COMMAND ----------
-
-# DBTITLE 1,manual insertion
-if manual:
-  sched_detail_table.update(df)
-
-# COMMAND ----------
-
-if False: 
-  move_files_to_incoming(source=FAILED)
-
-# COMMAND ----------
-
-# DBTITLE 1,manual test date format
-if manual: 
-    # Grab a sample file to check raw column formats
-    _sample_file = "dlverreport_301491_202601.tar.gz"  # change as needed
-    _sample_bytes = get_file_bytesio(_sample_file)
-    _sample_local, _sample_dbfs = extract_scheduled_files(_sample_bytes)
-
-    _raw_summary = spark.read.csv(
-        f"dbfs:{_sample_local.replace('/dbfs', '')}/scheduled_summary_301491_202601",  # adjust filename
-        header=True, sep="|", inferSchema=False  # inferSchema=False to see raw strings
-    )
-
-    _raw_summary.select("MONTH_YR_OF_MOST_RECENT_DOWNLOAD").distinct().show(20, truncate=False)
-
-    # cleanup
-    dbutils.fs.rm(_sample_dbfs, recurse=True)
-
-# COMMAND ----------
-
-# DBTITLE 1,manual move bval files
-if False:
-  # Move all 787768 files out of processing to a separate location (or just failed/)
-  for item in dbutils.fs.ls(_storage + PROCESSING):
-      if "787768" in item.name:
-          print(f"Moving {item.name}")
-          dbutils.fs.mv(item.path, _storage + f"{BASE_PATH}/excluded/" + item.name)
-
-  # Also move any in incoming
-  for item in dbutils.fs.ls(_storage + INCOMING):
-      if "787768" in item.name:
-          print(f"Moving {item.name}")
-          dbutils.fs.mv(item.path, _storage + f"{BASE_PATH}/excluded/" + item.name)
-
-# COMMAND ----------
-
-if True:
-  (
-    process_log_table.current()
-    .orderBy(col("file_name"), col("process_date").desc())
-    .display()
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,fix old bval items in log
-if False:
-  # Fix false COMPLETEDs and stuck PROCESSINGs for 787768
-  override_files = (
-      process_log_table.current()
-      .where(col("file_name").contains("787768"))
-      .where(col("process_status").isin("COMPLETED", "PROCESSING"))
-      .select("file_name", "file_size", "file_checksum")
-      .distinct()
-  )
-
-  for row in override_files.collect():
-      log_status(
-          row.file_name, row.file_size, row.file_checksum,
-          Processing_Status.OVERRIDE, 
-          "Account 787768 excluded — BVAL product, not scheduled securities"
-      )
 
 # COMMAND ----------
 

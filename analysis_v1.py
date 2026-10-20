@@ -661,10 +661,6 @@ robeco_bar_chart(_pivot_grouped, stacked=True, title="Billed Unique Securities b
 
 # COMMAND ----------
 
-sd_df.select("ACCOUNT_ID").distinct().display()
-
-# COMMAND ----------
-
 # DBTITLE 1,Billed vs Non-billed Unique Securities by Product - Monthly (Main Account)
 (
   # monthly distinct securities; Y = billed, N = requested but not counted for billing (CTRB_BILLING = "N")
@@ -841,44 +837,6 @@ required_data = (
 
 # MAGIC %md
 # MAGIC # Appendix - Graveyard
-
-# COMMAND ----------
-
-if False:
-  # NETTED_USAGE
-  # Create a new column named NETTED _USAGE in the scheduled_securities report. If
-  # CTRB_BILLING, CTRB_AC, BO_OPTIMIZED, CTRB_BAC are “N”, the request was
-  # netted.
-  df_combined.withColumn("NETTED_USAGE", when((col("CTRB_BILLING") == "N") & (col("CTRB_AC") == "N") & (col("BO_OPTIMIZED") == "N") & (col("CTRB_BAC") == "N"), lit("Y")))\
-    .filter(col("BILLABLE_PRODUCT") == Billable_Products.FI_SECM)\
-    .filter((col("DATE") >= lit("2024-07-01")) & (col("DATE") <= lit("2024-10-31")))\
-      .groupBy(col("NETTED_USAGE")).agg(F.countDistinct(col("ID_BB_UNIQUE"))).display()
-
-
-  # F – Per Security FTP; H – Webservices;
-  # df_combined.groupBy("SERVICE", "BILLABLE_PRODUCT").count().display()
-  svc = df_jun.groupBy("BILLABLE_PRODUCT").pivot("SERVICE").count()
-
-  # replace nulls with zeroes for the total
-  svc = svc.withColumn("TOTAL", svc.F + svc.H)
-  svc = svc.withColumn("F_PCT", F.format_number(svc.F / svc.TOTAL, 2))
-  svc = svc.withColumn("H_PCT", F.format_number(svc.H / svc.TOTAL, 2))
-  svc.select(
-    col("BILLABLE_PRODUCT"), 
-    col("F").alias("PerSec"), 
-    col("H").alias("WebSvc"), 
-    col("F_PCT").alias("PerSec_Pct"), 
-    col("H_PCT").alias("WebSvc_Pct"), "TOTAL").orderBy(F.desc("TOTAL")).display()
-
-  sm_apr = df_apr.\
-    filter((col("BILLABLE_PRODUCT") == "Sched Equity SecMaster") & (col("CTRB_BILLING") == "Y"))
-
-  # there can be more than one security per ID_BB_UNIQUE
-  sm_apr.select(["SECURITY", "ID_BB_UNIQUE"]).groupBy("ID_BB_UNIQUE").\
-    agg(countDistinct("SECURITY")).orderBy(F.desc("count(SECURITY)")).display()
-
-  sm_apr.select(countDistinct("SECURITY")).display()
-  sm_apr.select(countDistinct("ID_BB_UNIQUE")).display()
 
 # COMMAND ----------
 
