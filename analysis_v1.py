@@ -12,271 +12,8 @@
 
 # COMMAND ----------
 
-# DBTITLE 1,Run Utils
-# MAGIC %run "./utils"
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Imports and Helper Functions
-
-# COMMAND ----------
-
-# DBTITLE 1,Imports
-import datetime
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
-# COMMAND ----------
-
-# DBTITLE 1,Colour Scheme
-robeco_palette = {
-    "Blue": "#00A2BD",
-    "Orange": "#F79608",
-    "Pink": "#B50063",
-}
-
-# COMMAND ----------
-
-# DBTITLE 1,Chart Helpers
-def robeco_bar_chart(data, x=None, y=None, *, title="", xlabel="Month", ylabel="Count", color=None, figsize=(14, 6), stacked=False, legend_title=None, colors=None):
-    """Standard Robeco-styled bar chart. For stacked charts, `colors` is an optional list (one per column)
-    or dict (column -> colour); without it matplotlib's 10-colour cycle repeats after 10 series."""
-    fig, ax = plt.subplots(figsize=figsize)
-    if stacked:
-        if isinstance(colors, dict):
-            colors = [colors[c] for c in data.columns]
-        data.plot.bar(stacked=True, ax=ax, width=0.85, color=colors)
-    else:
-        ax.bar(data[x], data[y], color=color or robeco_palette["Blue"])
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.tick_params(axis="x", rotation=45)
-    ax.yaxis.grid(True, linestyle="--", alpha=0.5, color="LightGrey")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.set_axisbelow(True)
-    if legend_title:
-        ax.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
-    plt.tight_layout()
-    display(fig)
-    plt.close(fig)
-
-
-def robeco_dumbbell_chart(data, label_col, start_col, end_col, *, title="", start_label="Start", end_label="End", xlabel="Unique Securities", figsize=(12, None), log=False, flag_col=None):
-    """Robeco-styled dumbbell chart: one row per label, a dot for start and end values joined by a line.
-    log=True uses a log x-axis (products differ by orders of magnitude); flag_col bolds flagged rows."""
-    data = data.sort_values(end_col).reset_index(drop=True)
-    if log:  # zeros cannot be shown on a log axis; plot them at 1 (labels still show the true delta)
-        data = data.assign(_s=data[start_col].clip(lower=1), _e=data[end_col].clip(lower=1))
-    else:
-        data = data.assign(_s=data[start_col], _e=data[end_col])
-    height = figsize[1] or max(3, 0.45 * len(data) + 1.5)
-    fig, ax = plt.subplots(figsize=(figsize[0], height))
-    y = range(len(data))
-    ax.hlines(y, data["_s"], data["_e"], color="LightGrey", linewidth=3, zorder=1)
-    ax.scatter(data["_s"], y, color=robeco_palette["Blue"], s=60, label=start_label, zorder=2)
-    ax.scatter(data["_e"], y, color=robeco_palette["Orange"], s=30, label=end_label, zorder=3)
-    for i, row in data.iterrows():
-        delta = row[end_col] - row[start_col]
-        pct = f" ({delta / row[start_col]:+.1%})" if row[start_col] else " (new)"
-        flagged = bool(flag_col and row[flag_col])
-        colour = robeco_palette["Pink"] if flagged else "DimGrey"
-        ax.annotate(
-            f"{row[start_col]:,.0f} -> {row[end_col]:,.0f}   {delta:+,.0f}{pct}",
-            (max(row["_s"], row["_e"]), i), xytext=(10, 0), textcoords="offset points",
-            va="center", fontsize=8, color=colour, fontweight="bold" if flagged else "normal",
-        )
-    if log:
-        ax.set_xscale("log")
-        ax.set_xlim(right=data[["_s", "_e"]].max().max() * 8)  # room for labels
-    ax.set_yticks(list(y))
-    ax.set_yticklabels(data[label_col], fontsize=9)
-    if flag_col:
-        for tick, flagged in zip(ax.get_yticklabels(), data[flag_col]):
-            if flagged:
-                tick.set_color(robeco_palette["Pink"])
-                tick.set_fontweight("bold")
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.xaxis.grid(True, linestyle="--", alpha=0.5, color="LightGrey")
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    ax.set_axisbelow(True)
-    ax.legend(loc="lower right", fontsize=8)
-    plt.tight_layout()
-    display(fig)
-    plt.close(fig)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Load Data
-
-# COMMAND ----------
-
-# DBTITLE 1,Load Tables
-ss_df = (
-    tables("bbg.verification_sched_summary", "rob6332").current()
-    .withColumn("STATUS", F.when(col("TOTAL_USAGE") > 0, "ACTIVE").otherwise("INACTIVE"))
-)
-
-sd_df = (
-    tables("bbg.verification_sched_detail", "rob6332").current()
-    .withColumns(
-        {
-            "DATE": F.to_date(col("PROCESSED_TIME")),
-            "PROCESS_ID": F.when(col("SERVICE") == "F", F.substring(col("OUTPUT_ID"), 1, 3)).otherwise("API"),
-            "PROCESS_NAME": process_map[col("PROCESS_ID")],
-            # calendar month in the same format as ss_df.REPORT_YR_MONTH so the two tables can be joined
-            "REPORT_YR_MONTH": F.date_format(col("PROCESSED_TIME"), "yyyy/MM"),
-            # environment from the OUTPUT_ID suffix of named jobs (e.g. BBP_Analytics_PROD -> PROD, PREP_DM_EQ_TST -> TST).
-            # FTP files (B02_<date>_<time>.ENC) and web-service request ids (<n>-<n>.OUT) carry no environment -> N/A
-            "ENV": F.coalesce(
-                F.nullif(F.upper(F.regexp_extract(col("OUTPUT_ID"), r"(?i)_(PROD|PRD|UAT|ACC|TST|TEST|DEV)$", 1)), F.lit("")),
-                F.lit("N/A"),
-            ),
-        }
-    )
-)
-
-# billed requests only - the default basis for all trend analysis
-sd_billed = sd_df.where(col("CTRB_BILLING") == "Y")
-
-# COMMAND ----------
-
-# DBTITLE 1,Report Parameters
-# ACCOUNT_ID is a string column in both tables
-MAIN_ACCOUNT = "301491"
-PORT_ACCOUNT = "791626"
-ACCOUNTS = {MAIN_ACCOUNT: "Main", PORT_ACCOUNT: "PORT"}
-
-# Derive report month from latest data
-REPORT_MONTH = (
-  ss_df
-  .select(F.max("REPORT_YR_MONTH").alias("latest"))
-  .first()["latest"]
-)
-
-PRIOR_MONTH = (datetime.datetime.strptime(REPORT_MONTH, "%Y/%m").replace(day=1) - datetime.timedelta(days=1)).strftime("%Y/%m")
-
-LOOKBACK_START = "2024-01-01"
-LOOKBACK_MONTH = LOOKBACK_START[:7].replace("-", "/")  # same start in REPORT_YR_MONTH format
-
-# month-over-month flag: both conditions must hold, so low-volume products don't trigger on small absolute moves
-MOM_PCT_THRESHOLD = 0.10
-MOM_ABS_THRESHOLD = 50
-
-print(f"Report Month:   {REPORT_MONTH}")
-print(f"Prior Month:    {PRIOR_MONTH}")
-print(f"Main Account:   {MAIN_ACCOUNT}")
-print(f"PORT Account:   {PORT_ACCOUNT}")
-print(f"Lookback Start: {LOOKBACK_START}")
-
-# COMMAND ----------
-
-# DBTITLE 1,Core Metrics
-# Shared metric tables used by the Executive Summary, Reconciliation, Month-over-Month and Job Attribution sections.
-# Unit of billing = one (BILLABLE_PRODUCT, ID_BB_UNIQUE) pair per account per month.
-_keys = ["ACCOUNT_ID", "REPORT_YR_MONTH", "BILLABLE_PRODUCT", "ID_BB_UNIQUE"]
-
-# --- Billed securities from the summary report (= invoice basis) -------------------------------
-billed_securities = (
-    ss_df
-    .where(col("ACCOUNT_ID").isin(list(ACCOUNTS)))
-    .groupBy(_keys)  # a security can have several rows (e.g. qualifiers); ACTIVE if any row has usage
-    .agg(
-        F.max(col("TOTAL_USAGE") > 0).alias("IS_ACTIVE"),
-        F.sum("GROUP_AC").alias("ACCESS"),
-    )
-    .withColumn("STATUS", F.when(col("IS_ACTIVE"), "ACTIVE").otherwise("INACTIVE"))
-    .drop("IS_ACTIVE")
-)
-
-# --- Billed requests from the detail report, with the job that made them ------------------------
-# JOB:
-#   F (FTP)          OUTPUT_ID is a per-file name (B02_<date>_<time>.ENC) -> group by process, e.g. "FTP B02 Security";
-#                    files outside the Bxx naming (BDL_OILANDGAS.CSV, History*.out) keep their OUTPUT_ID
-#   H (Web Services) OUTPUT_ID is a per-request id (<n>-<n>.OUT) -> one bucket
-#   other (e.g. P)   OUTPUT_ID is a named job (BBP_Analytics_PROD) -> use as is
-NON_PROD_ENVS = ["UAT", "ACC", "TST", "TEST", "DEV"]
-
-billed_requests = (
-    sd_billed
-    .where(col("ACCOUNT_ID").isin(list(ACCOUNTS)))
-    .withColumn(
-        "JOB",
-        F.when(
-            (col("SERVICE") == "F") & col("OUTPUT_ID").rlike(r"^B\d\d_") & col("PROCESS_NAME").isNotNull(),
-            F.concat_ws(" ", F.lit("FTP"), col("PROCESS_ID"), col("PROCESS_NAME")),
-        )
-        .when(col("SERVICE") == "H", F.lit("Web Services (per request)"))
-        .otherwise(col("OUTPUT_ID")),
-    )
-    .select(*_keys, "JOB", "SERVICE", "ENV")
-    .distinct()
-)
-
-# --- Summary vs detail reconciliation ------------------------------------------------------------
-# INACTIVE billed securities (no usage this month, carried from earlier downloads) have no detail rows, so:
-#   MATCH  <=>  every ACTIVE summary security is in the detail (summary_only_active = 0)
-#          and  every billed detail security is in the summary (detail_only = 0)
-_sd_keys = billed_requests.select(_keys).distinct().withColumn("IN_DETAIL", F.lit(True))
-
-recon_df = (
-    billed_securities.withColumn("IN_SUMMARY", F.lit(True))
-    .join(_sd_keys, _keys, "full_outer")
-    .groupBy("ACCOUNT_ID", "REPORT_YR_MONTH", "BILLABLE_PRODUCT")
-    .agg(
-        F.count(F.when(col("IN_SUMMARY"), 1)).alias("billed_total"),
-        F.count(F.when(col("STATUS") == "ACTIVE", 1)).alias("billed_active"),
-        F.count(F.when(col("STATUS") == "INACTIVE", 1)).alias("billed_inactive"),
-        F.coalesce(F.sum("ACCESS"), F.lit(0)).alias("access"),
-        F.count(F.when(col("IN_DETAIL"), 1)).alias("detail_billed"),
-        # billed but no billed request this month (carried over). Not always equal to billed_inactive:
-        # STATUS comes from TOTAL_USAGE, which is 0 for some PORT securities that were requested.
-        F.count(F.when(col("IN_SUMMARY") & col("IN_DETAIL").isNull(), 1)).alias("billed_not_requested"),
-        F.count(F.when((col("STATUS") == "ACTIVE") & col("IN_DETAIL").isNull(), 1)).alias("summary_only_active"),
-        F.count(F.when(col("IN_SUMMARY").isNull() & col("IN_DETAIL"), 1)).alias("detail_only"),
-    )
-    .withColumn("inactive_pct", F.round(col("billed_inactive") / col("billed_total"), 3))
-    .withColumn("status", F.when((col("summary_only_active") == 0) & (col("detail_only") == 0), "MATCH").otherwise("MISMATCH"))
-)
-
-# --- Month-over-month change per account and product (REPORT_MONTH vs PRIOR_MONTH) ---------------
-_cur = recon_df.where(col("REPORT_YR_MONTH") == REPORT_MONTH).select("ACCOUNT_ID", "BILLABLE_PRODUCT", col("billed_total").alias("current"))
-_pri = recon_df.where(col("REPORT_YR_MONTH") == PRIOR_MONTH).select("ACCOUNT_ID", "BILLABLE_PRODUCT", col("billed_total").alias("prior"))
-
-mom_df = (
-    _cur.join(_pri, ["ACCOUNT_ID", "BILLABLE_PRODUCT"], "full_outer")
-    .fillna(0, subset=["current", "prior"])
-    .withColumn("delta", col("current") - col("prior"))
-    .withColumn("pct", F.when(col("prior") > 0, F.round(col("delta") / col("prior"), 3)))
-    .withColumn(
-        "flag",
-        ((F.abs(col("pct")) >= MOM_PCT_THRESHOLD) | col("pct").isNull()) & (F.abs(col("delta")) >= MOM_ABS_THRESHOLD),
-    )
-)
-
-# --- Securities added / dropped between PRIOR_MONTH and REPORT_MONTH, attributed to jobs ----------
-_sec_cur = billed_securities.where(col("REPORT_YR_MONTH") == REPORT_MONTH).select("ACCOUNT_ID", "BILLABLE_PRODUCT", "ID_BB_UNIQUE")
-_sec_pri = billed_securities.where(col("REPORT_YR_MONTH") == PRIOR_MONTH).select("ACCOUNT_ID", "BILLABLE_PRODUCT", "ID_BB_UNIQUE")
-
-def _with_jobs(securities, month, unattributed_label):
-    """Attach the job(s) that requested each security in `month`; securities with no billed request get a label."""
-    jobs = billed_requests.where(col("REPORT_YR_MONTH") == month).select("ACCOUNT_ID", "BILLABLE_PRODUCT", "ID_BB_UNIQUE", "JOB")
-    return (
-        securities.join(jobs, ["ACCOUNT_ID", "BILLABLE_PRODUCT", "ID_BB_UNIQUE"], "left")
-        .withColumn("JOB", F.coalesce(col("JOB"), F.lit(unattributed_label)))
-    )
-
-added_df = _with_jobs(_sec_cur.subtract(_sec_pri), REPORT_MONTH, "Billed without request this month").withColumn("CHANGE", F.lit("added"))
-dropped_df = _with_jobs(_sec_pri.subtract(_sec_cur), PRIOR_MONTH, "Carried over, no longer billed").withColumn("CHANGE", F.lit("dropped"))
-changes_df = added_df.unionByName(dropped_df)
-
-print(f"Core metrics built for {REPORT_MONTH} vs {PRIOR_MONTH}")
+# DBTITLE 1,Run Report Core
+# MAGIC %run "./report_core"
 
 # COMMAND ----------
 
@@ -289,6 +26,7 @@ print(f"Core metrics built for {REPORT_MONTH} vs {PRIOR_MONTH}")
 # MAGIC * **New / discontinued product**: a billable product appears or disappears vs the prior month
 # MAGIC * **Non-prod billed**: billed requests from jobs whose `OUTPUT_ID` ends in a non-production suffix (UAT, ACC, TST, TEST, DEV)
 # MAGIC * **Reconciliation**: summary vs detail check fails for a product
+# MAGIC * **Incomplete data**: an account is missing the summary or detail file for the report month (bulk mid-month export not yet fully ingested)
 
 # COMMAND ----------
 
@@ -385,8 +123,23 @@ _recon_flags = (
     )
 )
 
+# Completeness: flag any account that is missing summary or detail data for the report month
+_completeness_rows = []
+for _acct, _info in COMPLETENESS.items():
+    if _info["status"] != "PASS":
+        _completeness_rows.append((_acct, ", ".join(_info["missing"])))
+if _completeness_rows:
+    _completeness_flags = spark.createDataFrame(_completeness_rows, ["ACCOUNT_ID", "_missing"]).select(
+        F.lit("Incomplete data").alias("rule"), "ACCOUNT_ID",
+        F.lit(REPORT_MONTH).alias("item"),
+        F.concat(F.lit("Missing: "), col("_missing")).alias("detail"),
+        F.lit(9999).alias("_size"),
+    )
+else:
+    _completeness_flags = spark.createDataFrame([], "rule: string, ACCOUNT_ID: string, item: string, detail: string, _size: int")
+
 flags_df = (
-    _recon_flags.unionByName(_mom_flags).unionByName(_access_flags).unionByName(_product_flags).unionByName(_nonprod_flags)
+    _completeness_flags.unionByName(_recon_flags).unionByName(_mom_flags).unionByName(_access_flags).unionByName(_product_flags).unionByName(_nonprod_flags)
     .orderBy("rule", "ACCOUNT_ID", col("_size").desc())
     .drop("_size")
 )
@@ -604,280 +357,174 @@ for account_id, account_name in ACCOUNTS.items():
 
 # DBTITLE 1,Usage Trends Header
 # MAGIC %md
-# MAGIC ### Usage Trends (Billed Only)
-# MAGIC Unless stated otherwise, charts use billed requests (`CTRB_BILLING = "Y"`) from the detail report, counted as distinct securities per calendar month (which aligns with the billing month, see the reconciliation). Carried-over securities are not in the detail report, so these counts are below the invoice totals.
+# MAGIC ### Usage Trends
+# MAGIC All charts and tables loop over both accounts on the same basis:
+# MAGIC * **Stacked bar and monthly table**: billed requests from the detail report (`CTRB_BILLING = "Y"`), counted as distinct securities per calendar month. Carried-over securities are not in the detail, so these counts are below the invoice totals.
+# MAGIC * **Billed vs non-billed**: all requests from the detail report (Y and N), to show what was requested but not billed.
+# MAGIC * **By job**: billed (product, security) pairs per job from the detail report.
 
 # COMMAND ----------
 
-# DBTITLE 1,(1) Billed FTP Unique Securities Over Time (Main Account)
-_pdf = (
-  sd_billed
-  .where(col("DATE") >= LOOKBACK_START)
-  .where(col("SERVICE") == "F")
-  .where(col("ACCOUNT_ID") == MAIN_ACCOUNT)
-  .groupBy(col("REPORT_YR_MONTH").alias("report_yr_mth"))
-  .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
-  .orderBy("report_yr_mth")
-  .toPandas()
-)
-
-robeco_bar_chart(_pdf, x="report_yr_mth", y="count", title=f"Billed FTP Unique Securities Over Time - Main ({MAIN_ACCOUNT})")
-
-# COMMAND ----------
-
-# DBTITLE 1,Billed Unique Securities by Product Over Time (All Accounts)
-_pdf = (
-  sd_billed  # note: includes all accounts in the detail report, not only Main and PORT
-  .where(col("DATE") >= LOOKBACK_START)
-  .groupBy("BILLABLE_PRODUCT", col("REPORT_YR_MONTH").alias("report_yr_mth"))
-  .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
-  .orderBy("report_yr_mth")
-  .toPandas()
-)
-
-_pivot = _pdf.pivot(index="report_yr_mth", columns="BILLABLE_PRODUCT", values="count").fillna(0)
-
-# Keep top N products by total volume, bucket rest as "Other"
-top_n = 8
-totals = _pivot.sum().sort_values(ascending=False)
-top_cols = totals.head(top_n).index.tolist()
-_pivot_grouped = _pivot[top_cols].copy()
-_pivot_grouped["Other"] = _pivot.drop(columns=top_cols).sum(axis=1)
-
-robeco_bar_chart(_pivot_grouped, stacked=True, title="Billed Unique Securities by Product Over Time (All Accounts)", figsize=(16, 7), legend_title="Billable Product")
+# DBTITLE 1,Billed Unique Securities by Product Over Time
+# Stacked bar chart: billed unique securities by product per month, one chart per account.
+for account_id, account_name in ACCOUNTS.items():
+    _pdf = (
+        sd_billed
+        .where(col("DATE") >= LOOKBACK_START)
+        .where(col("ACCOUNT_ID") == account_id)
+        .groupBy("BILLABLE_PRODUCT", col("REPORT_YR_MONTH").alias("report_yr_mth"))
+        .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
+        .orderBy("report_yr_mth")
+        .toPandas()
+    )
+    _pivot = _pdf.pivot(index="report_yr_mth", columns="BILLABLE_PRODUCT", values="count").fillna(0)
+    top_n = 8
+    totals = _pivot.sum().sort_values(ascending=False)
+    top_cols = totals.head(top_n).index.tolist()
+    _pivot_grouped = _pivot[top_cols].copy()
+    if len(_pivot.columns) > top_n:
+        _pivot_grouped["Other"] = _pivot.drop(columns=top_cols).sum(axis=1)
+    robeco_bar_chart(
+        _pivot_grouped, stacked=True, figsize=(16, 7), legend_title="Billable Product",
+        title=f"Billed Unique Securities by Product Over Time - {account_name} ({account_id})",
+    )
 
 # COMMAND ----------
 
-# DBTITLE 1,Billed Unique Securities by Product - Monthly Table (Main Account)
-(
-  sd_billed
-  .where(col("DATE") >= LOOKBACK_START)
-  .where(col("ACCOUNT_ID") == MAIN_ACCOUNT)
-  .groupBy(col("BILLABLE_PRODUCT"), col("REPORT_YR_MONTH").alias("report_yr_mth"))
-  .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
-  .orderBy(col("report_yr_mth").asc(), col("count").desc())
-  .display()
-)
+# DBTITLE 1,Billed Unique Securities by Product - Monthly Table
+# Monthly detail table: billed unique securities by product, one table per account.
+for account_id, account_name in ACCOUNTS.items():
+    print(f"\n{account_name} ({account_id})")
+    (
+        sd_billed
+        .where(col("DATE") >= LOOKBACK_START)
+        .where(col("ACCOUNT_ID") == account_id)
+        .groupBy("BILLABLE_PRODUCT", col("REPORT_YR_MONTH").alias("report_yr_mth"))
+        .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
+        .orderBy(col("report_yr_mth").asc(), col("count").desc())
+        .display()
+    )
 
 # COMMAND ----------
 
-# DBTITLE 1,Billed vs Non-billed Unique Securities by Product - Monthly (Main Account)
-(
-  # monthly distinct securities; Y = billed, N = requested but not counted for billing (CTRB_BILLING = "N")
-  sd_df
-  .where(col("ACCOUNT_ID") == MAIN_ACCOUNT)
-  .where(col("DATE") >= LOOKBACK_START)
-  .groupBy("REPORT_YR_MONTH", "BILLABLE_PRODUCT")
-  .pivot("CTRB_BILLING", ["Y", "N"])
-  .agg(F.countDistinct("ID_BB_UNIQUE"))
-  .fillna(0)
-  .orderBy(col("REPORT_YR_MONTH").desc(), col("Y").desc())
-  .display()
-)
+# DBTITLE 1,Billed vs Non-billed by Product - Monthly
+# Monthly Y/N pivot: billed (CTRB_BILLING=Y) vs requested-but-not-billed (N), one table per account.
+for account_id, account_name in ACCOUNTS.items():
+    print(f"\n{account_name} ({account_id})")
+    (
+        sd_df
+        .where(col("ACCOUNT_ID") == account_id)
+        .where(col("DATE") >= LOOKBACK_START)
+        .groupBy("REPORT_YR_MONTH", "BILLABLE_PRODUCT")
+        .pivot("CTRB_BILLING", ["Y", "N"])
+        .agg(F.countDistinct("ID_BB_UNIQUE"))
+        .fillna(0)
+        .orderBy(col("REPORT_YR_MONTH").desc(), col("Y").desc())
+        .display()
+    )
 
 # COMMAND ----------
 
-# DBTITLE 1,Billed Unique Securities by Job - Monthly Table (Main Account)
-(
-  # JOB groups per-file FTP OUTPUT_IDs by process (see Core Metrics); counts are (product, security) pairs
-  billed_requests
-  .where(col("ACCOUNT_ID") == MAIN_ACCOUNT)
-  .where(col("REPORT_YR_MONTH") >= LOOKBACK_MONTH)
-  .groupBy("REPORT_YR_MONTH", "JOB")
-  .agg(F.countDistinct("BILLABLE_PRODUCT", "ID_BB_UNIQUE").alias("billed_pairs"))
-  .orderBy(col("REPORT_YR_MONTH").desc(), col("billed_pairs").desc())
-  .display()
-)
+# DBTITLE 1,Billed Unique Securities by Job - Monthly Table
+# Monthly billed (product, security) pairs per job, one table per account.
+for account_id, account_name in ACCOUNTS.items():
+    print(f"\n{account_name} ({account_id})")
+    (
+        billed_requests
+        .where(col("ACCOUNT_ID") == account_id)
+        .where(col("REPORT_YR_MONTH") >= LOOKBACK_MONTH)
+        .groupBy("REPORT_YR_MONTH", "JOB")
+        .agg(F.countDistinct("BILLABLE_PRODUCT", "ID_BB_UNIQUE").alias("billed_pairs"))
+        .orderBy(col("REPORT_YR_MONTH").desc(), col("billed_pairs").desc())
+        .display()
+    )
 
 # COMMAND ----------
 
-# DBTITLE 1,(2) Billed Unique Securities by Product Over Time (PORT Account)
-_pdf = (
-  sd_billed
-  .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-  .where(col("DATE") >= LOOKBACK_START)
-  .groupBy(col("REPORT_YR_MONTH").alias("report_yr_mth"), "BILLABLE_PRODUCT")
-  .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
-  .orderBy("report_yr_mth", "BILLABLE_PRODUCT")
-  .toPandas()
-)
-
-_pivot = _pdf.pivot(index="report_yr_mth", columns="BILLABLE_PRODUCT", values="count").fillna(0)
-
-robeco_bar_chart(_pivot, stacked=True, title=f"Billed Unique Securities by Product Over Time - PORT ({PORT_ACCOUNT})", figsize=(16, 7), legend_title="Billable Product")
-
-# COMMAND ----------
-
-# DBTITLE 1,ListDer SecMaster - Billed Unique by Account (Summary Report)
-(
-  ss_df
-  .where(col("BILLABLE_PRODUCT") == Billable_Products.LD_SECM)
-  .where(col("REPORT_YR_MONTH") >= LOOKBACK_MONTH)
-  .groupBy(col("BILLABLE_PRODUCT"), col("ACCOUNT_ID"), col("REPORT_YR_MONTH"))
-  .agg(F.countDistinct(col("ID_BB_UNIQUE")))
-  .orderBy(col("REPORT_YR_MONTH").asc())
-  .display()
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,PORT Header
+# DBTITLE 1,Carried-Over Securities Header
 # MAGIC %md
-# MAGIC ### PORT Account Analysis
+# MAGIC ### Carried-Over Securities
+# MAGIC Billed securities by last download month, bucketed by age relative to the report month. Based on the summary report (= invoice basis). Shows how stale the carried-over portion is.
 
 # COMMAND ----------
 
-# DBTITLE 1,PORT - Active Billed Securities by Product (Summary Report)
-(
-  ss_df
-  .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-  .where(col("STATUS") == "ACTIVE")
-  .where(col("REPORT_YR_MONTH") >= LOOKBACK_MONTH)
-  .groupBy(col("REPORT_YR_MONTH"), col("BILLABLE_PRODUCT"))
-  .agg(F.countDistinct(col("ID_BB_UNIQUE")))
-  .orderBy("REPORT_YR_MONTH")
-  .display()
-)
+# DBTITLE 1,Carried-Over Securities Age by Account
+# Age distribution of billed securities by last download month, relative to REPORT_MONTH.
+_report_dt = datetime.datetime.strptime(REPORT_MONTH, "%Y/%m")
+_report_yr, _report_mo = _report_dt.year, _report_dt.month
 
-# COMMAND ----------
-
-# DBTITLE 1,PORT - Billed Securities by Last Download Month (Report Month)
-(
-  ss_df
-  .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-  .where(col("REPORT_YR_MONTH") == REPORT_MONTH)
-  .groupBy(col("YR_MONTH_OF_MOST_RECENT_DOWNLOAD"), col("STATUS"))
-  .agg(F.countDistinct(col("ID_BB_UNIQUE")))
-  .orderBy(col("YR_MONTH_OF_MOST_RECENT_DOWNLOAD"))
-  .display()
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,(4) PORT FI SecMaster - Billed vs Non-billed by Month
-(
-  sd_df
-  .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-  .where(col("DATE") >= LOOKBACK_START)
-  .where(col("BILLABLE_PRODUCT") == Billable_Products.FI_SECM)
-  .groupBy("REPORT_YR_MONTH")
-  .pivot("CTRB_BILLING", ["Y", "N"])
-  .agg(F.countDistinct("ID_BB_UNIQUE"))
-  .fillna(0)
-  .orderBy("REPORT_YR_MONTH")
-  .display()
-)
-
-# COMMAND ----------
-
-# DBTITLE 1,Investigations Header
-# MAGIC %md
-# MAGIC ### Investigations
-# MAGIC One-off deep dives. Dates and file names are fixed to the period investigated and are not driven by `REPORT_MONTH`.
-
-# COMMAND ----------
-
-# DBTITLE 1,(3) PORT Account Job Overview - FI SecMaster
-# Investigation: which PORT jobs drive FI SecMaster billed volume, compared across specific snapshot dates (Aug-Nov 2025).
-# Dates are fixed to that investigation; edit the list to re-run for another period.
-required_data = (
-  sd_df
-  .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-  .where(col("DATE").isin([
-    "2025-08-01",
-    "2025-09-01",
-    # "2025-10-01",
-    # "2025-10-15",
-    # "2025-10-16",
-    "2025-10-31",
-    "2025-11-29"]))
-  .where(col("BILLABLE_PRODUCT") == Billable_Products.FI_SECM)
-  .groupBy("DATE", "OUTPUT_ID", "CTRB_BILLING").agg(F.countDistinct("ID_BB_UNIQUE").alias("Count"))
-  .orderBy("DATE", "CTRB_BILLING")
-)
-
-(
-  required_data
-  .withColumn("env", F.element_at(F.split("output_id", "_"), -1))
-  .groupBy("OUTPUT_ID", "CTRB_BILLING", "ENV")
-  .pivot("date")
-  .agg(F.first("count"))
-  # .agg(F.sum("count"))
-  .orderBy(
-    "CTRB_BILLING", 
-    F.when(F.lower(F.col("env")) == "dev", 1).when(F.lower(F.col("env")) == "uat", 2).when(F.lower(F.col("env")) == "prod", 3).otherwise(4), 
-    "OUTPUT_ID")
-).display()
-
-# COMMAND ----------
-
-# DBTITLE 1,Sanctions Issues
-# Three B02 (Security Master) FTP deliveries in Aug 2025 were flagged by the
-# sanctions screening process.  This query verifies which billable products
-# and how many unique securities were affected per delivery file.
-(
-  sd_df
-  .withColumn("OUTPUT_GROUP", F.substring(col("OUTPUT_ID"), 1, 3))
-  .where(col("PROCESSED_TIME") > "2025-08-01")
-  .where(col("SERVICE") == "F")
-  .where(col("ACCOUNT_ID") == MAIN_ACCOUNT)
-  .where(col("OUTPUT_GROUP") == "B02")
-  .where(col("OUTPUT_ID").isin(
-      "B02_20250818_144037.ENC",
-      "B02_20250828_155507.ENC",
-      "B02_20250829_150637.ENC",
-  ))
-  .groupBy(col("OUTPUT_ID"), col("BILLABLE_PRODUCT"))
-  .agg(F.countDistinct("ID_BB_UNIQUE").alias("count"))
-  .orderBy(col("OUTPUT_ID").asc(), col("BILLABLE_PRODUCT").asc())
-  .display()
-)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # Appendix - Graveyard
-
-# COMMAND ----------
-
-# DBTITLE 1,Graveyard - FX Forward Inspection (Oct 2025)
-if False:
-  # One-off inspection: FX forwards on the PORT account, billed under Sched ListDer SecMaster (listed derivatives),
-  # which is the expected classification.
-
-  # FX Forward Usage Over Time - Active vs Inactive
-  (
+# Deduplicate to one row per (account, product, security), taking the most recent download month.
+# Without this, a security with multiple qualifiers and different download months would be counted in two buckets.
+_age = (
     ss_df
-    .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-    .where(col("BILLABLE_PRODUCT") == Billable_Products.LD_SECM)
-    .groupBy(col("REPORT_YR_MONTH"), col("STATUS"))
-    .agg(F.countDistinct(col("ID_BB_UNIQUE")))
-    .orderBy(col("REPORT_YR_MONTH").asc())
-    .display()
-  )
+    .where(col("REPORT_YR_MONTH") == REPORT_MONTH)
+    .groupBy("ACCOUNT_ID", "BILLABLE_PRODUCT", "ID_BB_UNIQUE")
+    .agg(F.max("YR_MONTH_OF_MOST_RECENT_DOWNLOAD").alias("YR_MONTH_OF_MOST_RECENT_DOWNLOAD"))
+    .withColumn("_dl_yr", F.substring("YR_MONTH_OF_MOST_RECENT_DOWNLOAD", 1, 4).cast("int"))
+    .withColumn("_dl_mo", F.substring("YR_MONTH_OF_MOST_RECENT_DOWNLOAD", 6, 2).cast("int"))
+    .withColumn("_months_ago", (F.lit(_report_yr) - col("_dl_yr")) * 12 + F.lit(_report_mo) - col("_dl_mo"))
+    .withColumn(
+        "age_bucket",
+        F.when(col("_months_ago") == 0, "0  This month")
+        .when(col("_months_ago") == 1, "1  1 month ago")
+        .when(col("_months_ago") == 2, "2  2 months ago")
+        .when(col("_months_ago") <= 5, "3  3-5 months ago")
+        .when(col("_months_ago") <= 11, "4  6-11 months ago")
+        .otherwise("5  12+ months ago")
+    )
+)
 
-  # FXF Job Over Time
-  (
-    sd_df
-    .where(col("CTRB_BILLING") == "Y")
-    .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-    .where(col("OUTPUT_ID") == "BBG_FXF_Analytics_PROD")
-    .where(col("BILLABLE_PRODUCT") == Billable_Products.LD_SECM)
-    .withColumn("DOWNLOAD_MONTH", F.date_format(col("PROCESSED_TIME"), "yyyy-MM"))
-    .groupBy(col("OUTPUT_ID"), col("DOWNLOAD_MONTH"))
-    .agg(F.countDistinct(col("ID_BB_UNIQUE")))
-    .orderBy(col("OUTPUT_ID"), col("DOWNLOAD_MONTH"))
-    .display()
-  )
+for account_id, account_name in ACCOUNTS.items():
+    print(f"\n{account_name} ({account_id}) - {REPORT_MONTH}")
+    (
+        _age
+        .where(col("ACCOUNT_ID") == account_id)
+        .groupBy("age_bucket")
+        .agg(F.count("*").alias("billed_pairs"))
+        .orderBy("age_bucket")
+        .withColumn("age_bucket", F.regexp_replace("age_bucket", r"^\d  ", ""))
+        .display()
+    )
 
-  # Daily FXF Requests
-  (
-    sd_df
-    .where(col("CTRB_BILLING") == "Y")
-    .where(col("ACCOUNT_ID") == PORT_ACCOUNT)
-    .where(col("OUTPUT_ID") == "BBG_FXF_Analytics_PROD")
-    .groupBy(col("DATE"))
-    .agg(F.count("*").alias("Count"))
-    .orderBy(col("DATE").asc())
-    .display()
-  )
+# COMMAND ----------
+
+# DBTITLE 1,Carried-Over Securities Header
+# MAGIC %md
+# MAGIC ### Carried-Over Securities
+# MAGIC Billed securities by last download month, bucketed by age relative to the report month. Based on the summary report (= invoice basis). Shows how stale the carried-over portion is.
+
+# COMMAND ----------
+
+# DBTITLE 1,Carried-Over Securities Age by Account
+# Age distribution of billed securities by last download month, relative to REPORT_MONTH.
+_report_dt = datetime.datetime.strptime(REPORT_MONTH, "%Y/%m")
+_report_yr, _report_mo = _report_dt.year, _report_dt.month
+
+_age = (
+    ss_df
+    .where(col("REPORT_YR_MONTH") == REPORT_MONTH)
+    .withColumn("_dl_yr", F.substring("YR_MONTH_OF_MOST_RECENT_DOWNLOAD", 1, 4).cast("int"))
+    .withColumn("_dl_mo", F.substring("YR_MONTH_OF_MOST_RECENT_DOWNLOAD", 6, 2).cast("int"))
+    .withColumn("_months_ago", (F.lit(_report_yr) - col("_dl_yr")) * 12 + F.lit(_report_mo) - col("_dl_mo"))
+    .withColumn(
+        "age_bucket",
+        F.when(col("_months_ago") == 0, "0  This month")
+        .when(col("_months_ago") == 1, "1  1 month ago")
+        .when(col("_months_ago") == 2, "2  2 months ago")
+        .when(col("_months_ago") <= 5, "3  3-5 months ago")
+        .when(col("_months_ago") <= 11, "4  6-11 months ago")
+        .otherwise("5  12+ months ago")
+    )
+)
+
+for account_id, account_name in ACCOUNTS.items():
+    print(f"\n{account_name} ({account_id}) - {REPORT_MONTH}")
+    (
+        _age
+        .where(col("ACCOUNT_ID") == account_id)
+        .groupBy("age_bucket")
+        .agg(F.countDistinct("ID_BB_UNIQUE").alias("billed_unique"))
+        .orderBy("age_bucket")
+        .withColumn("age_bucket", F.regexp_replace("age_bucket", r"^\d  ", ""))
+        .display()
+    )
